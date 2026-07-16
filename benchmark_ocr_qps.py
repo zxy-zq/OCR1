@@ -51,6 +51,7 @@ def summarize_run(
     workers: int = 1,
     ort_threads: int | None = None,
     det_limit_side_len: int | None = None,
+    det_model_type: str | None = None,
 ) -> dict:
     success = len(ok_latencies)
     total = success + error_count
@@ -62,6 +63,7 @@ def summarize_run(
         "workers": workers,
         "ort_threads": ort_threads or "",
         "det_limit_side_len": det_limit_side_len or "",
+        "det_model_type": det_model_type or "",
         "concurrency": concurrency,
         "requests": total,
         "success": success,
@@ -92,6 +94,22 @@ def parse_optional_int_list(value: str) -> list[int | None]:
     return parse_int_list(value)
 
 
+def parse_det_model_types(value: str) -> list[str | None]:
+    if not value or value.strip().lower() == "auto":
+        return [None]
+
+    allowed = {"tiny", "small", "medium"}
+    items = [part.strip().lower() for part in value.split(",") if part.strip()]
+    if not items:
+        raise argparse.ArgumentTypeError("list cannot be empty")
+    invalid = [item for item in items if item not in allowed]
+    if invalid:
+        raise argparse.ArgumentTypeError(
+            "det model type must be one of: tiny, small, medium"
+        )
+    return items
+
+
 def build_server_env(
     base_env: dict[str, str],
     core_count: int,
@@ -99,6 +117,7 @@ def build_server_env(
     max_concurrency: int,
     preload: bool,
     det_limit_side_len: int | None = None,
+    det_model_type: str | None = None,
 ) -> dict[str, str]:
     env = base_env.copy()
     env.update(
@@ -116,6 +135,8 @@ def build_server_env(
         env["OCR_ORT_INTER_THREADS"] = "1"
     if det_limit_side_len is not None:
         env["OCR_DET_LIMIT_SIDE_LEN"] = str(det_limit_side_len)
+    if det_model_type:
+        env["OCR_DET_MODEL_TYPE"] = det_model_type
     return env
 
 
@@ -188,6 +209,7 @@ def start_server(
     ort_threads: int | None,
     max_concurrency: int,
     det_limit_side_len: int | None,
+    det_model_type: str | None,
 ) -> subprocess.Popen:
     env = build_server_env(
         base_env=os.environ,
@@ -196,6 +218,7 @@ def start_server(
         max_concurrency=max_concurrency,
         preload=True,
         det_limit_side_len=det_limit_side_len,
+        det_model_type=det_model_type,
     )
     process = subprocess.Popen(
         build_server_command(port=port, workers=workers),
@@ -237,6 +260,7 @@ async def benchmark_once(
     workers: int,
     ort_threads: int | None,
     det_limit_side_len: int | None,
+    det_model_type: str | None,
     concurrency: int,
     duration_s: float,
 ) -> dict:
@@ -273,6 +297,7 @@ async def benchmark_once(
         workers=workers,
         ort_threads=ort_threads,
         det_limit_side_len=det_limit_side_len,
+        det_model_type=det_model_type,
         concurrency=concurrency,
         elapsed_seconds=elapsed_seconds,
         ok_latencies=ok_latencies,
@@ -287,6 +312,7 @@ def write_csv(rows: list[dict], path: Path) -> None:
         "workers",
         "ort_threads",
         "det_limit_side_len",
+        "det_model_type",
         "concurrency",
         "requests",
         "success",
@@ -308,13 +334,13 @@ def write_csv(rows: list[dict], path: Path) -> None:
 
 def markdown_table(rows: list[dict]) -> str:
     lines = [
-        "| CPU核心数 | Worker数 | ORT线程 | 检测尺寸 | 并发数 | QPS | 成功率 | 平均延迟(ms) | P95(ms) | P99(ms) | 成功/总请求 |",
-        "|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|",
+        "| CPU核心数 | Worker数 | ORT线程 | 检测尺寸 | Det模型 | 并发数 | QPS | 成功率 | 平均延迟(ms) | P95(ms) | P99(ms) | 成功/总请求 |",
+        "|---:|---:|---:|---:|---|---:|---:|---:|---:|---:|---:|---:|",
     ]
     for row in rows:
         lines.append(
             "| {core_count} | {workers} | {ort_threads} | {det_limit_side_len} | "
-            "{concurrency} | {qps:.3f} | {success_rate:.2f}% | {avg_ms:.1f} | "
+            "{det_model_type} | {concurrency} | {qps:.3f} | {success_rate:.2f}% | {avg_ms:.1f} | "
             "{p95_ms:.1f} | {p99_ms:.1f} | {success}/{requests} |".format(**row)
         )
     return "\n".join(lines)
@@ -345,14 +371,14 @@ def write_report(
     )
 
     best_lines = [
-        "| CPU核心数 | Worker数 | ORT线程 | 检测尺寸 | 最佳并发 | 峰值QPS | 相对单核峰值 | P95(ms) |",
-        "|---:|---:|---:|---:|---:|---:|---:|---:|",
+        "| CPU核心数 | Worker数 | ORT线程 | 检测尺寸 | Det模型 | 最佳并发 | 峰值QPS | 相对单核峰值 | P95(ms) |",
+        "|---:|---:|---:|---:|---|---:|---:|---:|---:|",
     ]
     for row in best_rows:
         speedup = row["qps"] / single_core_peak if single_core_peak else 0.0
         best_lines.append(
             f"| {row['core_count']} | {row['workers']} | {row['ort_threads']} | "
-            f"{row['det_limit_side_len']} | {row['concurrency']} | "
+            f"{row['det_limit_side_len']} | {row['det_model_type']} | {row['concurrency']} | "
             f"{row['qps']:.3f} | {speedup:.2f}x | {row['p95_ms']:.1f} |"
         )
 
@@ -366,7 +392,7 @@ def write_report(
 - 被测接口：`POST /api/measure/ocr`
 - 启动方式：`uvicorn ocr_server:app`
 - CPU控制：每轮启动独立服务进程，并设置进程 CPU 亲和性为前 N 个逻辑核心
-- OCR控制：通过 `OCR_PRELOAD`、`OCR_MAX_CONCURRENCY`、`OCR_ORT_INTRA_THREADS`、`OCR_DET_LIMIT_SIDE_LEN` 控制服务行为
+- OCR控制：通过 `OCR_PRELOAD`、`OCR_MAX_CONCURRENCY`、`OCR_ORT_INTRA_THREADS`、`OCR_DET_LIMIT_SIDE_LEN`、`OCR_DET_MODEL_TYPE` 控制服务行为
 - 压测请求：JSON `image_path`，固定图片 `{image_path.name}`
 - 单轮时长：{duration_s} 秒
 - 统计方式：到达单轮时长后停止发起新请求，已发起请求会等待完成；各组合真实完成耗时见 CSV/表格 `elapsed_s`
@@ -382,7 +408,7 @@ def write_report(
 
 ## 结论
 
-- 本轮最高 QPS：{best_overall['qps']:.3f}，出现在 {best_overall['core_count']} 核、{best_overall['workers']} worker、ORT线程 {best_overall['ort_threads']}、检测尺寸 {best_overall['det_limit_side_len']}、并发 {best_overall['concurrency']}。
+- 本轮最高 QPS：{best_overall['qps']:.3f}，出现在 {best_overall['core_count']} 核、{best_overall['workers']} worker、ORT线程 {best_overall['ort_threads']}、检测尺寸 {best_overall['det_limit_side_len']}、Det模型 {best_overall['det_model_type']}、并发 {best_overall['concurrency']}。
 - 单核峰值：{single_core_peak:.3f} QPS。
 
 ## 各核心数峰值
@@ -414,55 +440,59 @@ async def run(args: argparse.Namespace) -> None:
         for workers in args.workers:
             for ort_threads in args.ort_threads:
                 for det_limit_side_len in args.det_limit_side_len:
-                    port = available_port()
-                    base_url = f"http://127.0.0.1:{port}"
-                    max_concurrency = max(args.concurrency)
-                    process = start_server(
-                        core_count=core_count,
-                        port=port,
-                        workers=workers,
-                        ort_threads=ort_threads,
-                        max_concurrency=max_concurrency,
-                        det_limit_side_len=det_limit_side_len,
-                    )
-                    try:
-                        await wait_for_health(base_url, process, timeout_s=90.0)
-                        sample_response = await warmup(
-                            base_url, image_path, args.warmup_requests
+                    for det_model_type in args.det_model_type:
+                        port = available_port()
+                        base_url = f"http://127.0.0.1:{port}"
+                        max_concurrency = max(args.concurrency)
+                        process = start_server(
+                            core_count=core_count,
+                            port=port,
+                            workers=workers,
+                            ort_threads=ort_threads,
+                            max_concurrency=max_concurrency,
+                            det_limit_side_len=det_limit_side_len,
+                            det_model_type=det_model_type,
                         )
-                        for concurrency in args.concurrency:
-                            print(
-                                "running cores={core_count}, workers={workers}, "
-                                "ort_threads={ort_threads}, det_limit={det_limit}, "
-                                "concurrency={concurrency}".format(
+                        try:
+                            await wait_for_health(base_url, process, timeout_s=90.0)
+                            sample_response = await warmup(
+                                base_url, image_path, args.warmup_requests
+                            )
+                            for concurrency in args.concurrency:
+                                print(
+                                    "running cores={core_count}, workers={workers}, "
+                                    "ort_threads={ort_threads}, det_limit={det_limit}, "
+                                    "det_model={det_model}, concurrency={concurrency}".format(
+                                        core_count=core_count,
+                                        workers=workers,
+                                        ort_threads=ort_threads or "auto",
+                                        det_limit=det_limit_side_len or "auto",
+                                        det_model=det_model_type or "auto",
+                                        concurrency=concurrency,
+                                    ),
+                                    flush=True,
+                                )
+                                row = await benchmark_once(
+                                    base_url=base_url,
+                                    image_path=image_path,
                                     core_count=core_count,
                                     workers=workers,
-                                    ort_threads=ort_threads or "auto",
-                                    det_limit=det_limit_side_len or "auto",
+                                    ort_threads=ort_threads,
+                                    det_limit_side_len=det_limit_side_len,
+                                    det_model_type=det_model_type,
                                     concurrency=concurrency,
-                                ),
-                                flush=True,
-                            )
-                            row = await benchmark_once(
-                                base_url=base_url,
-                                image_path=image_path,
-                                core_count=core_count,
-                                workers=workers,
-                                ort_threads=ort_threads,
-                                det_limit_side_len=det_limit_side_len,
-                                concurrency=concurrency,
-                                duration_s=args.duration,
-                            )
-                            print(
-                                "  qps={qps:.3f}, avg={avg_ms:.1f}ms, p95={p95_ms:.1f}ms, "
-                                "success={success}/{requests}, errors={errors}".format(
-                                    **row
-                                ),
-                                flush=True,
-                            )
-                            rows.append(row)
-                    finally:
-                        stop_server(process)
+                                    duration_s=args.duration,
+                                )
+                                print(
+                                    "  qps={qps:.3f}, avg={avg_ms:.1f}ms, p95={p95_ms:.1f}ms, "
+                                    "success={success}/{requests}, errors={errors}".format(
+                                        **row
+                                    ),
+                                    flush=True,
+                                )
+                                rows.append(row)
+                        finally:
+                            stop_server(process)
 
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     csv_path = REPORT_DIR / f"ocr_qps_results_{timestamp}.csv"
@@ -507,6 +537,12 @@ def build_parser() -> argparse.ArgumentParser:
         type=parse_optional_int_list,
         default=parse_optional_int_list("auto"),
         help="comma-separated RapidOCR detection limit_side_len values, or auto",
+    )
+    parser.add_argument(
+        "--det-model-type",
+        type=parse_det_model_types,
+        default=parse_det_model_types("auto"),
+        help="comma-separated RapidOCR detection model types: tiny,small,medium, or auto",
     )
     parser.add_argument(
         "--concurrency",

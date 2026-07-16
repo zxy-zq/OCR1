@@ -10,6 +10,7 @@ warnings.filterwarnings(
     message="Using `httpx` with `starlette.testclient` is deprecated.*",
 )
 from fastapi.testclient import TestClient
+from rapidocr.utils.typings import ModelType
 
 from ocr_server import build_rapidocr_params, create_app
 
@@ -51,6 +52,7 @@ class OCRServerTest(unittest.TestCase):
                 "OCR_ORT_INTRA_THREADS": "2",
                 "OCR_ORT_INTER_THREADS": "1",
                 "OCR_DET_LIMIT_SIDE_LEN": "512",
+                "OCR_DET_MODEL_TYPE": "tiny",
             },
             clear=False,
         ):
@@ -61,6 +63,7 @@ class OCRServerTest(unittest.TestCase):
         self.assertEqual(params["EngineConfig.onnxruntime.intra_op_num_threads"], 2)
         self.assertEqual(params["EngineConfig.onnxruntime.inter_op_num_threads"], 1)
         self.assertEqual(params["Det.limit_side_len"], 512)
+        self.assertEqual(params["Det.model_type"], ModelType.TINY)
 
     def test_app_lifespan_preloads_ocr_runner_when_enabled(self):
         calls = []

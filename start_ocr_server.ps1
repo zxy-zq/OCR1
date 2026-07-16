@@ -4,6 +4,8 @@ param(
     [int]$MaxConcurrency = 8,
     [string]$OrtThreads = "auto",
     [string]$DetLimitSideLen = "auto",
+    [ValidateSet("auto", "tiny", "small", "medium")]
+    [string]$DetModelType = "auto",
     [string]$LogLevel = "info",
     [switch]$NoPreload
 )
@@ -23,6 +25,10 @@ if ($OrtThreads -ne "auto") {
 
 if ($DetLimitSideLen -ne "auto") {
     $env:OCR_DET_LIMIT_SIDE_LEN = $DetLimitSideLen
+}
+
+if ($DetModelType -ne "auto") {
+    $env:OCR_DET_MODEL_TYPE = $DetModelType
 }
 
 .\.venv\Scripts\python.exe -m uvicorn ocr_server:app `

@@ -13,6 +13,7 @@ from typing import Callable, Iterable, Mapping, Optional, Union
 import anyio
 from fastapi import FastAPI, File, HTTPException, Request, UploadFile
 from rapidocr import RapidOCR
+from rapidocr.utils.typings import ModelType
 
 from measure_parser import parse_measure_ocr
 
@@ -46,6 +47,10 @@ def build_rapidocr_params(env: Mapping[str, str] = os.environ) -> dict:
     det_limit_side_len = parse_int_env(env, "OCR_DET_LIMIT_SIDE_LEN")
     if det_limit_side_len is not None:
         params["Det.limit_side_len"] = det_limit_side_len
+
+    det_model_type = parse_model_type_env(env, "OCR_DET_MODEL_TYPE")
+    if det_model_type is not None:
+        params["Det.model_type"] = det_model_type
 
     for env_name, param_name in (
         (
@@ -84,6 +89,22 @@ def parse_int_env(env: Mapping[str, str], name: str) -> Optional[int]:
     if value is None or value == "":
         return None
     return int(value)
+
+
+def parse_model_type_env(env: Mapping[str, str], name: str) -> Optional[ModelType]:
+    value = env.get(name)
+    if value is None or value == "":
+        return None
+
+    normalized = value.strip().lower()
+    model_types = {
+        "tiny": ModelType.TINY,
+        "small": ModelType.SMALL,
+        "medium": ModelType.MEDIUM,
+    }
+    if normalized not in model_types:
+        raise ValueError(f"{name} must be one of: tiny, small, medium")
+    return model_types[normalized]
 
 
 def parse_float_env(env: Mapping[str, str], name: str, default: float) -> float:

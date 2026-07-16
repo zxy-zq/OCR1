@@ -29,12 +29,14 @@ class BenchmarkOCRQPSTest(unittest.TestCase):
             workers=2,
             ort_threads=1,
             det_limit_side_len=512,
+            det_model_type="tiny",
         )
 
         self.assertEqual(summary["core_count"], 2)
         self.assertEqual(summary["workers"], 2)
         self.assertEqual(summary["ort_threads"], 1)
         self.assertEqual(summary["det_limit_side_len"], 512)
+        self.assertEqual(summary["det_model_type"], "tiny")
         self.assertEqual(summary["concurrency"], 4)
         self.assertEqual(summary["requests"], 4)
         self.assertEqual(summary["success"], 3)
@@ -59,6 +61,7 @@ class BenchmarkOCRQPSTest(unittest.TestCase):
             max_concurrency=3,
             preload=True,
             det_limit_side_len=512,
+            det_model_type="tiny",
         )
 
         self.assertEqual(env["OMP_NUM_THREADS"], "4")
@@ -66,6 +69,7 @@ class BenchmarkOCRQPSTest(unittest.TestCase):
         self.assertEqual(env["OCR_MAX_CONCURRENCY"], "3")
         self.assertEqual(env["OCR_PRELOAD"], "true")
         self.assertEqual(env["OCR_DET_LIMIT_SIDE_LEN"], "512")
+        self.assertEqual(env["OCR_DET_MODEL_TYPE"], "tiny")
 
     def test_markdown_table_uses_readable_chinese_headers(self):
         row = summarize_run(
