@@ -50,6 +50,7 @@ def summarize_run(
     error_count: int,
     workers: int = 1,
     ort_threads: int | None = None,
+    det_limit_side_len: int | None = None,
 ) -> dict:
     success = len(ok_latencies)
     total = success + error_count
@@ -60,6 +61,7 @@ def summarize_run(
         "core_count": core_count,
         "workers": workers,
         "ort_threads": ort_threads or "",
+        "det_limit_side_len": det_limit_side_len or "",
         "concurrency": concurrency,
         "requests": total,
         "success": success,
@@ -96,6 +98,7 @@ def build_server_env(
     ort_threads: int | None,
     max_concurrency: int,
     preload: bool,
+    det_limit_side_len: int | None = None,
 ) -> dict[str, str]:
     env = base_env.copy()
     env.update(
@@ -111,6 +114,8 @@ def build_server_env(
     if ort_threads is not None:
         env["OCR_ORT_INTRA_THREADS"] = str(ort_threads)
         env["OCR_ORT_INTER_THREADS"] = "1"
+    if det_limit_side_len is not None:
+        env["OCR_DET_LIMIT_SIDE_LEN"] = str(det_limit_side_len)
     return env
 
 
@@ -182,6 +187,7 @@ def start_server(
     workers: int,
     ort_threads: int | None,
     max_concurrency: int,
+    det_limit_side_len: int | None,
 ) -> subprocess.Popen:
     env = build_server_env(
         base_env=os.environ,
@@ -189,6 +195,7 @@ def start_server(
         ort_threads=ort_threads,
         max_concurrency=max_concurrency,
         preload=True,
+        det_limit_side_len=det_limit_side_len,
     )
     process = subprocess.Popen(
         build_server_command(port=port, workers=workers),
@@ -229,6 +236,7 @@ async def benchmark_once(
     core_count: int,
     workers: int,
     ort_threads: int | None,
+    det_limit_side_len: int | None,
     concurrency: int,
     duration_s: float,
 ) -> dict:
@@ -264,6 +272,7 @@ async def benchmark_once(
         core_count=core_count,
         workers=workers,
         ort_threads=ort_threads,
+        det_limit_side_len=det_limit_side_len,
         concurrency=concurrency,
         elapsed_seconds=elapsed_seconds,
         ok_latencies=ok_latencies,
@@ -277,6 +286,7 @@ def write_csv(rows: list[dict], path: Path) -> None:
         "core_count",
         "workers",
         "ort_threads",
+        "det_limit_side_len",
         "concurrency",
         "requests",
         "success",
@@ -298,14 +308,14 @@ def write_csv(rows: list[dict], path: Path) -> None:
 
 def markdown_table(rows: list[dict]) -> str:
     lines = [
-        "| CPU核心数 | Worker数 | ORT线程 | 并发数 | QPS | 成功率 | 平均延迟(ms) | P95(ms) | P99(ms) | 成功/总请求 |",
-        "|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|",
+        "| CPU核心数 | Worker数 | ORT线程 | 检测尺寸 | 并发数 | QPS | 成功率 | 平均延迟(ms) | P95(ms) | P99(ms) | 成功/总请求 |",
+        "|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|",
     ]
     for row in rows:
         lines.append(
-            "| {core_count} | {workers} | {ort_threads} | {concurrency} | {qps:.3f} | "
-            "{success_rate:.2f}% | {avg_ms:.1f} | {p95_ms:.1f} | {p99_ms:.1f} | "
-            "{success}/{requests} |".format(**row)
+            "| {core_count} | {workers} | {ort_threads} | {det_limit_side_len} | "
+            "{concurrency} | {qps:.3f} | {success_rate:.2f}% | {avg_ms:.1f} | "
+            "{p95_ms:.1f} | {p99_ms:.1f} | {success}/{requests} |".format(**row)
         )
     return "\n".join(lines)
 
@@ -335,15 +345,15 @@ def write_report(
     )
 
     best_lines = [
-        "| CPU核心数 | Worker数 | ORT线程 | 最佳并发 | 峰值QPS | 相对单核峰值 | P95(ms) |",
-        "|---:|---:|---:|---:|---:|---:|---:|",
+        "| CPU核心数 | Worker数 | ORT线程 | 检测尺寸 | 最佳并发 | 峰值QPS | 相对单核峰值 | P95(ms) |",
+        "|---:|---:|---:|---:|---:|---:|---:|---:|",
     ]
     for row in best_rows:
         speedup = row["qps"] / single_core_peak if single_core_peak else 0.0
         best_lines.append(
             f"| {row['core_count']} | {row['workers']} | {row['ort_threads']} | "
-            f"{row['concurrency']} | {row['qps']:.3f} | {speedup:.2f}x | "
-            f"{row['p95_ms']:.1f} |"
+            f"{row['det_limit_side_len']} | {row['concurrency']} | "
+            f"{row['qps']:.3f} | {speedup:.2f}x | {row['p95_ms']:.1f} |"
         )
 
     best_overall = max(rows, key=lambda row: row["qps"])
@@ -356,8 +366,7 @@ def write_report(
 - 被测接口：`POST /api/measure/ocr`
 - 启动方式：`uvicorn ocr_server:app`
 - CPU控制：每轮启动独立服务进程，并设置进程 CPU 亲和性为前 N 个逻辑核心
-- 线程控制：同步设置 `OMP_NUM_THREADS`、`OPENBLAS_NUM_THREADS`、`MKL_NUM_THREADS`、`NUMEXPR_NUM_THREADS`
-- OCR控制：通过 `OCR_PRELOAD`、`OCR_MAX_CONCURRENCY`、`OCR_ORT_INTRA_THREADS`、`OCR_ORT_INTER_THREADS` 控制服务行为
+- OCR控制：通过 `OCR_PRELOAD`、`OCR_MAX_CONCURRENCY`、`OCR_ORT_INTRA_THREADS`、`OCR_DET_LIMIT_SIDE_LEN` 控制服务行为
 - 压测请求：JSON `image_path`，固定图片 `{image_path.name}`
 - 单轮时长：{duration_s} 秒
 - 统计方式：到达单轮时长后停止发起新请求，已发起请求会等待完成；各组合真实完成耗时见 CSV/表格 `elapsed_s`
@@ -373,9 +382,8 @@ def write_report(
 
 ## 结论
 
-- 本轮最高 QPS：{best_overall['qps']:.3f}，出现在 {best_overall['core_count']} 核、{best_overall['workers']} worker、ORT线程 {best_overall['ort_threads']}、并发 {best_overall['concurrency']}。
+- 本轮最高 QPS：{best_overall['qps']:.3f}，出现在 {best_overall['core_count']} 核、{best_overall['workers']} worker、ORT线程 {best_overall['ort_threads']}、检测尺寸 {best_overall['det_limit_side_len']}、并发 {best_overall['concurrency']}。
 - 单核峰值：{single_core_peak:.3f} QPS。
-- 最优并发通常出现在延迟开始明显上升前；继续增加并发会提高排队时间，但不一定提高吞吐。
 
 ## 各核心数峰值
 
@@ -405,49 +413,56 @@ async def run(args: argparse.Namespace) -> None:
     for core_count in core_counts:
         for workers in args.workers:
             for ort_threads in args.ort_threads:
-                port = available_port()
-                base_url = f"http://127.0.0.1:{port}"
-                max_concurrency = max(args.concurrency)
-                process = start_server(
-                    core_count=core_count,
-                    port=port,
-                    workers=workers,
-                    ort_threads=ort_threads,
-                    max_concurrency=max_concurrency,
-                )
-                try:
-                    await wait_for_health(base_url, process, timeout_s=90.0)
-                    sample_response = await warmup(
-                        base_url, image_path, args.warmup_requests
+                for det_limit_side_len in args.det_limit_side_len:
+                    port = available_port()
+                    base_url = f"http://127.0.0.1:{port}"
+                    max_concurrency = max(args.concurrency)
+                    process = start_server(
+                        core_count=core_count,
+                        port=port,
+                        workers=workers,
+                        ort_threads=ort_threads,
+                        max_concurrency=max_concurrency,
+                        det_limit_side_len=det_limit_side_len,
                     )
-                    for concurrency in args.concurrency:
-                        print(
-                            "running cores={core_count}, workers={workers}, "
-                            "ort_threads={ort_threads}, concurrency={concurrency}".format(
+                    try:
+                        await wait_for_health(base_url, process, timeout_s=90.0)
+                        sample_response = await warmup(
+                            base_url, image_path, args.warmup_requests
+                        )
+                        for concurrency in args.concurrency:
+                            print(
+                                "running cores={core_count}, workers={workers}, "
+                                "ort_threads={ort_threads}, det_limit={det_limit}, "
+                                "concurrency={concurrency}".format(
+                                    core_count=core_count,
+                                    workers=workers,
+                                    ort_threads=ort_threads or "auto",
+                                    det_limit=det_limit_side_len or "auto",
+                                    concurrency=concurrency,
+                                ),
+                                flush=True,
+                            )
+                            row = await benchmark_once(
+                                base_url=base_url,
+                                image_path=image_path,
                                 core_count=core_count,
                                 workers=workers,
-                                ort_threads=ort_threads or "auto",
+                                ort_threads=ort_threads,
+                                det_limit_side_len=det_limit_side_len,
                                 concurrency=concurrency,
-                            ),
-                            flush=True,
-                        )
-                        row = await benchmark_once(
-                            base_url=base_url,
-                            image_path=image_path,
-                            core_count=core_count,
-                            workers=workers,
-                            ort_threads=ort_threads,
-                            concurrency=concurrency,
-                            duration_s=args.duration,
-                        )
-                        print(
-                            "  qps={qps:.3f}, avg={avg_ms:.1f}ms, p95={p95_ms:.1f}ms, "
-                            "success={success}/{requests}, errors={errors}".format(**row),
-                            flush=True,
-                        )
-                        rows.append(row)
-                finally:
-                    stop_server(process)
+                                duration_s=args.duration,
+                            )
+                            print(
+                                "  qps={qps:.3f}, avg={avg_ms:.1f}ms, p95={p95_ms:.1f}ms, "
+                                "success={success}/{requests}, errors={errors}".format(
+                                    **row
+                                ),
+                                flush=True,
+                            )
+                            rows.append(row)
+                    finally:
+                        stop_server(process)
 
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     csv_path = REPORT_DIR / f"ocr_qps_results_{timestamp}.csv"
@@ -486,6 +501,12 @@ def build_parser() -> argparse.ArgumentParser:
         type=parse_optional_int_list,
         default=parse_optional_int_list("auto"),
         help="comma-separated ONNXRuntime intra-op thread counts, or auto",
+    )
+    parser.add_argument(
+        "--det-limit-side-len",
+        type=parse_optional_int_list,
+        default=parse_optional_int_list("auto"),
+        help="comma-separated RapidOCR detection limit_side_len values, or auto",
     )
     parser.add_argument(
         "--concurrency",

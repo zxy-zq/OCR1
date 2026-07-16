@@ -50,6 +50,7 @@ class OCRServerTest(unittest.TestCase):
                 "OCR_USE_CLS": "false",
                 "OCR_ORT_INTRA_THREADS": "2",
                 "OCR_ORT_INTER_THREADS": "1",
+                "OCR_DET_LIMIT_SIDE_LEN": "512",
             },
             clear=False,
         ):
@@ -59,6 +60,7 @@ class OCRServerTest(unittest.TestCase):
         self.assertEqual(params["Global.use_cls"], False)
         self.assertEqual(params["EngineConfig.onnxruntime.intra_op_num_threads"], 2)
         self.assertEqual(params["EngineConfig.onnxruntime.inter_op_num_threads"], 1)
+        self.assertEqual(params["Det.limit_side_len"], 512)
 
     def test_app_lifespan_preloads_ocr_runner_when_enabled(self):
         calls = []
@@ -102,6 +104,7 @@ class OCRServerTest(unittest.TestCase):
         self.assertIn("lines=3", log_text)
         self.assertIn("network=NR", log_text)
         self.assertIn("signal=-110", log_text)
+        self.assertIn("profile=unavailable", log_text)
 
     def test_concurrency_limit_returns_429_when_capacity_is_busy(self):
         entered = threading.Event()

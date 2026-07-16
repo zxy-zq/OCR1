@@ -27,6 +27,12 @@ PreloadRunner = Callable[[], object]
 _engine: Optional[RapidOCR] = None
 
 
+class OCRLines(list):
+    def __init__(self, lines: Iterable[str], profile: Optional[dict] = None):
+        super().__init__(lines)
+        self.profile = profile or {}
+
+
 def build_rapidocr_params(env: Mapping[str, str] = os.environ) -> dict:
     params = {
         "Global.model_root_dir": str(MODEL_DIR),
@@ -36,6 +42,10 @@ def build_rapidocr_params(env: Mapping[str, str] = os.environ) -> dict:
     use_cls = parse_bool_env(env, "OCR_USE_CLS")
     if use_cls is not None:
         params["Global.use_cls"] = use_cls
+
+    det_limit_side_len = parse_int_env(env, "OCR_DET_LIMIT_SIDE_LEN")
+    if det_limit_side_len is not None:
+        params["Det.limit_side_len"] = det_limit_side_len
 
     for env_name, param_name in (
         (
@@ -91,8 +101,42 @@ def get_engine() -> RapidOCR:
 
 
 def run_rapidocr(image: ImageInput) -> list[str]:
+    started = time.perf_counter()
     result = get_engine()(image)
-    return list(result.txts or [])
+    total_ms = (time.perf_counter() - started) * 1000
+    return OCRLines(result.txts or [], profile=build_ocr_profile(result, total_ms))
+
+
+def build_ocr_profile(result: object, total_ms: float) -> dict:
+    elapse_list = list(getattr(result, "elapse_list", []) or [])
+    det_ms = seconds_to_ms(elapse_list[0]) if len(elapse_list) > 0 else 0.0
+    cls_ms = seconds_to_ms(elapse_list[1]) if len(elapse_list) > 1 else 0.0
+    rec_ms = seconds_to_ms(elapse_list[2]) if len(elapse_list) > 2 else 0.0
+    known_ms = det_ms + cls_ms + rec_ms
+    return {
+        "total_ms": total_ms,
+        "det_ms": det_ms,
+        "cls_ms": cls_ms,
+        "rec_ms": rec_ms,
+        "other_ms": max(0.0, total_ms - known_ms),
+    }
+
+
+def seconds_to_ms(value: object) -> float:
+    try:
+        return float(value) * 1000
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def format_ocr_profile(lines: Iterable[str]) -> str:
+    profile = getattr(lines, "profile", None)
+    if not profile:
+        return "profile=unavailable"
+    return (
+        "profile=total_ms={total_ms:.1f} det_ms={det_ms:.1f} cls_ms={cls_ms:.1f} "
+        "rec_ms={rec_ms:.1f} other_ms={other_ms:.1f}"
+    ).format(**profile)
 
 
 def create_app(
@@ -167,7 +211,7 @@ def create_app(
             result = parse_measure_ocr(lines)
             logger.info(
                 "OCR request success input=%s duration_ms=%.1f lines=%s "
-                "network=%s cell_id=%s signal=%s max_concurrency=%s",
+                "network=%s cell_id=%s signal=%s max_concurrency=%s %s",
                 input_source,
                 (time.perf_counter() - started) * 1000,
                 line_count,
@@ -175,6 +219,7 @@ def create_app(
                 result.get("cell_id"),
                 result.get("signal"),
                 request.app.state.ocr_max_concurrency,
+                format_ocr_profile(lines),
             )
             return result
         except Exception:

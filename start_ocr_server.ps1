@@ -3,6 +3,7 @@ param(
     [int]$Workers = 1,
     [int]$MaxConcurrency = 8,
     [string]$OrtThreads = "auto",
+    [string]$DetLimitSideLen = "auto",
     [string]$LogLevel = "info",
     [switch]$NoPreload
 )
@@ -18,6 +19,10 @@ $env:OCR_MAX_CONCURRENCY = [string]$MaxConcurrency
 if ($OrtThreads -ne "auto") {
     $env:OCR_ORT_INTRA_THREADS = $OrtThreads
     $env:OCR_ORT_INTER_THREADS = "1"
+}
+
+if ($DetLimitSideLen -ne "auto") {
+    $env:OCR_DET_LIMIT_SIDE_LEN = $DetLimitSideLen
 }
 
 .\.venv\Scripts\python.exe -m uvicorn ocr_server:app `
