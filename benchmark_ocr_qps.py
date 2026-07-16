@@ -48,6 +48,8 @@ def summarize_run(
     elapsed_seconds: float,
     ok_latencies: list[float],
     error_count: int,
+    workers: int = 1,
+    ort_threads: int | None = None,
 ) -> dict:
     success = len(ok_latencies)
     total = success + error_count
@@ -56,6 +58,8 @@ def summarize_run(
 
     return {
         "core_count": core_count,
+        "workers": workers,
+        "ort_threads": ort_threads or "",
         "concurrency": concurrency,
         "requests": total,
         "success": success,
@@ -78,6 +82,36 @@ def parse_int_list(value: str) -> list[int]:
     if any(item < 1 for item in items):
         raise argparse.ArgumentTypeError("all values must be positive integers")
     return items
+
+
+def parse_optional_int_list(value: str) -> list[int | None]:
+    if not value or value.strip().lower() == "auto":
+        return [None]
+    return parse_int_list(value)
+
+
+def build_server_env(
+    base_env: dict[str, str],
+    core_count: int,
+    ort_threads: int | None,
+    max_concurrency: int,
+    preload: bool,
+) -> dict[str, str]:
+    env = base_env.copy()
+    env.update(
+        {
+            "OMP_NUM_THREADS": str(core_count),
+            "OPENBLAS_NUM_THREADS": str(core_count),
+            "MKL_NUM_THREADS": str(core_count),
+            "NUMEXPR_NUM_THREADS": str(core_count),
+            "OCR_MAX_CONCURRENCY": str(max_concurrency),
+            "OCR_PRELOAD": "true" if preload else "false",
+        }
+    )
+    if ort_threads is not None:
+        env["OCR_ORT_INTRA_THREADS"] = str(ort_threads)
+        env["OCR_ORT_INTER_THREADS"] = "1"
+    return env
 
 
 def set_process_affinity(pid: int, core_count: int) -> None:
@@ -108,6 +142,23 @@ def available_port() -> int:
         return int(sock.getsockname()[1])
 
 
+def build_server_command(port: int, workers: int) -> list[str]:
+    return [
+        sys.executable,
+        "-m",
+        "uvicorn",
+        "ocr_server:app",
+        "--host",
+        "127.0.0.1",
+        "--port",
+        str(port),
+        "--workers",
+        str(workers),
+        "--log-level",
+        "warning",
+    ]
+
+
 async def wait_for_health(base_url: str, process: subprocess.Popen, timeout_s: float) -> None:
     deadline = time.perf_counter() + timeout_s
     async with httpx.AsyncClient(timeout=2.0) as client:
@@ -125,32 +176,22 @@ async def wait_for_health(base_url: str, process: subprocess.Popen, timeout_s: f
     raise TimeoutError(f"server did not become healthy: {last_error}")
 
 
-def start_server(core_count: int, port: int) -> subprocess.Popen:
-    env = os.environ.copy()
-    env.update(
-        {
-            "OMP_NUM_THREADS": str(core_count),
-            "OPENBLAS_NUM_THREADS": str(core_count),
-            "MKL_NUM_THREADS": str(core_count),
-            "NUMEXPR_NUM_THREADS": str(core_count),
-        }
+def start_server(
+    core_count: int,
+    port: int,
+    workers: int,
+    ort_threads: int | None,
+    max_concurrency: int,
+) -> subprocess.Popen:
+    env = build_server_env(
+        base_env=os.environ,
+        core_count=core_count,
+        ort_threads=ort_threads,
+        max_concurrency=max_concurrency,
+        preload=True,
     )
-    command = [
-        sys.executable,
-        "-m",
-        "uvicorn",
-        "ocr_server:app",
-        "--host",
-        "127.0.0.1",
-        "--port",
-        str(port),
-        "--workers",
-        "1",
-        "--log-level",
-        "warning",
-    ]
     process = subprocess.Popen(
-        command,
+        build_server_command(port=port, workers=workers),
         cwd=ROOT,
         env=env,
         stdout=subprocess.DEVNULL,
@@ -186,6 +227,8 @@ async def benchmark_once(
     base_url: str,
     image_path: Path,
     core_count: int,
+    workers: int,
+    ort_threads: int | None,
     concurrency: int,
     duration_s: float,
 ) -> dict:
@@ -219,6 +262,8 @@ async def benchmark_once(
 
     return summarize_run(
         core_count=core_count,
+        workers=workers,
+        ort_threads=ort_threads,
         concurrency=concurrency,
         elapsed_seconds=elapsed_seconds,
         ok_latencies=ok_latencies,
@@ -230,6 +275,8 @@ def write_csv(rows: list[dict], path: Path) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     fields = [
         "core_count",
+        "workers",
+        "ort_threads",
         "concurrency",
         "requests",
         "success",
@@ -251,15 +298,14 @@ def write_csv(rows: list[dict], path: Path) -> None:
 
 def markdown_table(rows: list[dict]) -> str:
     lines = [
-        "| CPU核心数 | 并发数 | QPS | 成功率 | 平均延迟(ms) | P95(ms) | P99(ms) | 成功/总请求 |",
-        "|---:|---:|---:|---:|---:|---:|---:|---:|",
+        "| CPU核心数 | Worker数 | ORT线程 | 并发数 | QPS | 成功率 | 平均延迟(ms) | P95(ms) | P99(ms) | 成功/总请求 |",
+        "|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|",
     ]
     for row in rows:
         lines.append(
-            "| {core_count} | {concurrency} | {qps:.3f} | {success_rate:.2f}% | "
-            "{avg_ms:.1f} | {p95_ms:.1f} | {p99_ms:.1f} | {success}/{requests} |".format(
-                **row
-            )
+            "| {core_count} | {workers} | {ort_threads} | {concurrency} | {qps:.3f} | "
+            "{success_rate:.2f}% | {avg_ms:.1f} | {p95_ms:.1f} | {p99_ms:.1f} | "
+            "{success}/{requests} |".format(**row)
         )
     return "\n".join(lines)
 
@@ -289,14 +335,15 @@ def write_report(
     )
 
     best_lines = [
-        "| CPU核心数 | 最佳并发 | 峰值QPS | 相对单核峰值 | P95(ms) |",
-        "|---:|---:|---:|---:|---:|",
+        "| CPU核心数 | Worker数 | ORT线程 | 最佳并发 | 峰值QPS | 相对单核峰值 | P95(ms) |",
+        "|---:|---:|---:|---:|---:|---:|---:|",
     ]
     for row in best_rows:
         speedup = row["qps"] / single_core_peak if single_core_peak else 0.0
         best_lines.append(
-            f"| {row['core_count']} | {row['concurrency']} | {row['qps']:.3f} | "
-            f"{speedup:.2f}x | {row['p95_ms']:.1f} |"
+            f"| {row['core_count']} | {row['workers']} | {row['ort_threads']} | "
+            f"{row['concurrency']} | {row['qps']:.3f} | {speedup:.2f}x | "
+            f"{row['p95_ms']:.1f} |"
         )
 
     best_overall = max(rows, key=lambda row: row["qps"])
@@ -307,9 +354,10 @@ def write_report(
 ## 测试口径
 
 - 被测接口：`POST /api/measure/ocr`
-- 启动方式：`uvicorn ocr_server:app --workers 1`
+- 启动方式：`uvicorn ocr_server:app`
 - CPU控制：每轮启动独立服务进程，并设置进程 CPU 亲和性为前 N 个逻辑核心
-- 线程控制：同步设置 `OMP_NUM_THREADS`、`OPENBLAS_NUM_THREADS`、`MKL_NUM_THREADS`、`NUMEXPR_NUM_THREADS` 为当前核心数
+- 线程控制：同步设置 `OMP_NUM_THREADS`、`OPENBLAS_NUM_THREADS`、`MKL_NUM_THREADS`、`NUMEXPR_NUM_THREADS`
+- OCR控制：通过 `OCR_PRELOAD`、`OCR_MAX_CONCURRENCY`、`OCR_ORT_INTRA_THREADS`、`OCR_ORT_INTER_THREADS` 控制服务行为
 - 压测请求：JSON `image_path`，固定图片 `{image_path.name}`
 - 单轮时长：{duration_s} 秒
 - 统计方式：到达单轮时长后停止发起新请求，已发起请求会等待完成；各组合真实完成耗时见 CSV/表格 `elapsed_s`
@@ -325,7 +373,7 @@ def write_report(
 
 ## 结论
 
-- 本轮最高 QPS：{best_overall['qps']:.3f}，出现在 {best_overall['core_count']} 核、并发 {best_overall['concurrency']}。
+- 本轮最高 QPS：{best_overall['qps']:.3f}，出现在 {best_overall['core_count']} 核、{best_overall['workers']} worker、ORT线程 {best_overall['ort_threads']}、并发 {best_overall['concurrency']}。
 - 单核峰值：{single_core_peak:.3f} QPS。
 - 最优并发通常出现在延迟开始明显上升前；继续增加并发会提高排队时间，但不一定提高吞吐。
 
@@ -355,32 +403,51 @@ async def run(args: argparse.Namespace) -> None:
     rows: list[dict] = []
     sample_response: dict = {}
     for core_count in core_counts:
-        port = available_port()
-        base_url = f"http://127.0.0.1:{port}"
-        process = start_server(core_count, port)
-        try:
-            await wait_for_health(base_url, process, timeout_s=90.0)
-            sample_response = await warmup(base_url, image_path, args.warmup_requests)
-            for concurrency in args.concurrency:
-                print(
-                    f"running cores={core_count}, concurrency={concurrency}",
-                    flush=True,
-                )
-                row = await benchmark_once(
-                    base_url=base_url,
-                    image_path=image_path,
+        for workers in args.workers:
+            for ort_threads in args.ort_threads:
+                port = available_port()
+                base_url = f"http://127.0.0.1:{port}"
+                max_concurrency = max(args.concurrency)
+                process = start_server(
                     core_count=core_count,
-                    concurrency=concurrency,
-                    duration_s=args.duration,
+                    port=port,
+                    workers=workers,
+                    ort_threads=ort_threads,
+                    max_concurrency=max_concurrency,
                 )
-                print(
-                    "  qps={qps:.3f}, avg={avg_ms:.1f}ms, p95={p95_ms:.1f}ms, "
-                    "success={success}/{requests}".format(**row),
-                    flush=True,
-                )
-                rows.append(row)
-        finally:
-            stop_server(process)
+                try:
+                    await wait_for_health(base_url, process, timeout_s=90.0)
+                    sample_response = await warmup(
+                        base_url, image_path, args.warmup_requests
+                    )
+                    for concurrency in args.concurrency:
+                        print(
+                            "running cores={core_count}, workers={workers}, "
+                            "ort_threads={ort_threads}, concurrency={concurrency}".format(
+                                core_count=core_count,
+                                workers=workers,
+                                ort_threads=ort_threads or "auto",
+                                concurrency=concurrency,
+                            ),
+                            flush=True,
+                        )
+                        row = await benchmark_once(
+                            base_url=base_url,
+                            image_path=image_path,
+                            core_count=core_count,
+                            workers=workers,
+                            ort_threads=ort_threads,
+                            concurrency=concurrency,
+                            duration_s=args.duration,
+                        )
+                        print(
+                            "  qps={qps:.3f}, avg={avg_ms:.1f}ms, p95={p95_ms:.1f}ms, "
+                            "success={success}/{requests}, errors={errors}".format(**row),
+                            flush=True,
+                        )
+                        rows.append(row)
+                finally:
+                    stop_server(process)
 
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     csv_path = REPORT_DIR / f"ocr_qps_results_{timestamp}.csv"
@@ -407,6 +474,18 @@ def build_parser() -> argparse.ArgumentParser:
         type=parse_int_list,
         default=parse_int_list("1,2,4,8"),
         help="comma-separated CPU core counts, for example 1,2,4,8",
+    )
+    parser.add_argument(
+        "--workers",
+        type=parse_int_list,
+        default=parse_int_list("1"),
+        help="comma-separated uvicorn worker counts, for example 1,2,4",
+    )
+    parser.add_argument(
+        "--ort-threads",
+        type=parse_optional_int_list,
+        default=parse_optional_int_list("auto"),
+        help="comma-separated ONNXRuntime intra-op thread counts, or auto",
     )
     parser.add_argument(
         "--concurrency",

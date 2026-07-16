@@ -1,6 +1,14 @@
+import os
 import unittest
 
-from benchmark_ocr_qps import core_affinity_mask, percentile, summarize_run
+from benchmark_ocr_qps import (
+    build_server_command,
+    build_server_env,
+    core_affinity_mask,
+    markdown_table,
+    percentile,
+    summarize_run,
+)
 
 
 class BenchmarkOCRQPSTest(unittest.TestCase):
@@ -31,6 +39,41 @@ class BenchmarkOCRQPSTest(unittest.TestCase):
         self.assertEqual(summary["avg_ms"], 200.0)
         self.assertEqual(summary["p50_ms"], 200.0)
         self.assertEqual(summary["p95_ms"], 290.0)
+
+    def test_build_server_command_sets_worker_count(self):
+        command = build_server_command(port=9876, workers=3)
+
+        self.assertIn("--workers", command)
+        self.assertEqual(command[command.index("--workers") + 1], "3")
+
+    def test_build_server_env_sets_ocr_runtime_controls(self):
+        env = build_server_env(
+            base_env={},
+            core_count=4,
+            ort_threads=2,
+            max_concurrency=3,
+            preload=True,
+        )
+
+        self.assertEqual(env["OMP_NUM_THREADS"], "4")
+        self.assertEqual(env["OCR_ORT_INTRA_THREADS"], "2")
+        self.assertEqual(env["OCR_MAX_CONCURRENCY"], "3")
+        self.assertEqual(env["OCR_PRELOAD"], "true")
+
+    def test_markdown_table_uses_readable_chinese_headers(self):
+        row = summarize_run(
+            core_count=8,
+            concurrency=2,
+            elapsed_seconds=1.0,
+            ok_latencies=[0.1],
+            error_count=0,
+        )
+
+        table = markdown_table([row])
+
+        self.assertIn("CPU核心数", table)
+        self.assertIn("并发数", table)
+        self.assertNotIn("鏍稿績", table)
 
 
 if __name__ == "__main__":
